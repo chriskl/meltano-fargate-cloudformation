@@ -1,0 +1,288 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template to set up a recurring AWS Batch that executes a single tap/target ELT using the specified meltano ECR image on a computing environment.
+
+Parameters:
+
+  JobName:
+    Type: String
+    Description: Descriptive job name
+  JobQueueArn:
+    Type: String
+    Description: ARN of job queue
+  EcrImageTag:
+    Type: String
+    Description: URI and tag of image the job will run
+  MonitoringEmail:
+    Type: String
+    Default: ""
+    Description: Email address that will receive monitoring alerts
+  JobFrequency:
+    Type: String
+    Default: 0 4 * * ? *
+    Description: Frequency of the DBT job in CRON format. Time will be in UTC timezone. For example, "0 4 * * ? *" (without quotes) will run the job everyday at 4:00 UTC.
+  RequiredMemory:
+    Type: String
+    Default: 2048
+    Description: Memory requirement of Fargate task
+  FullRefreshRequiredVCPU:
+    Type: String
+    Default: 1
+    Description: VCPU requirement of Fargate task when performing a full refresh
+  FullRefreshRequiredMemory:
+    Type: String
+    Default: 4096
+    Description: Memory requirement of Fargate task when performing a full refresh
+  RequiredVCPU:
+    Type: String
+    Default: 1
+    Description: VCPU requirement of Fargate task
+  MeltanoExtractor:
+    Type: String
+    Description: Name of tap.  eg. tap-salesforce
+  MeltanoLoader:
+    Type: String
+    Default: target-redshift
+    Description: Name of target. eg. target-redshift
+  MeltanoLoaderS3BucketArn:
+    Type: String
+    Description: ARN of bucket used to stage data for Loader
+  ParameterStoreKeyArn:
+    Type: String
+    Description: ARN of KMS key needed to decrypt parameters
+
+Resources:
+
+  FargateTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  FargateJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GetParametersByPath
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub "arn:aws:ssm:*:*:parameter/meltano/*"
+                  - !Sub "arn:aws:ssm:*:*:parameter/meltano/${MeltanoExtractor}/*"
+                  - !Sub "arn:aws:ssm:*:*:parameter/meltano/${MeltanoLoader}/*"
+        - PolicyName: KmsAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:ListKeys
+                  - kms:ListAliases
+                  - kms:Describe*
+                  - kms:Decrypt
+                Resource:
+                  - !Ref ParameterStoreKeyArn
+        - PolicyName: S3
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:List*
+                Resource:
+                  - !Ref MeltanoLoaderS3BucketArn
+              - Effect: Allow
+                Action:
+                  - s3:Put*
+                  - s3:Get*
+                  - s3:Delete*
+                Resource:
+                  - !Join
+                    - ''
+                    - - !Ref MeltanoLoaderS3BucketArn
+                      - '/*'
+
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      JobDefinitionName: !Ref JobName
+      PlatformCapabilities:
+        - FARGATE
+      PropagateTags: true
+      ContainerProperties:
+        ExecutionRoleArn: !GetAtt FargateTaskExecutionRole.Arn
+        JobRoleArn: !GetAtt FargateJobRole.Arn
+        Image: !Ref EcrImageTag
+        ResourceRequirements:
+          - Type: MEMORY
+            Value: !Ref RequiredMemory
+          - Type: VCPU
+            Value: !Ref RequiredVCPU
+        Environment:
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+        Command:
+          - chamber
+          - exec
+          - meltano
+          - !Sub "meltano/${MeltanoExtractor}"
+          - !Sub "meltano/${MeltanoLoader}"
+          - --
+          - meltano
+          - elt
+          - !Ref MeltanoExtractor
+          - !Ref MeltanoLoader
+          - --job_id
+          - !Ref JobName
+      RetryStrategy:
+        Attempts: 1
+
+  FullRefreshJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      JobDefinitionName: !Sub "${JobName}-full-refresh"
+      PlatformCapabilities:
+        - FARGATE
+      PropagateTags: true
+      ContainerProperties:
+        ExecutionRoleArn: !GetAtt FargateTaskExecutionRole.Arn
+        JobRoleArn: !GetAtt FargateJobRole.Arn
+        Image: !Ref EcrImageTag
+        ResourceRequirements:
+          - Type: MEMORY
+            Value: !Ref FullRefreshRequiredMemory
+          - Type: VCPU
+            Value: !Ref FullRefreshRequiredVCPU
+        Environment:
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+        Command:
+          - chamber
+          - exec
+          - meltano
+          - !Sub "meltano/${MeltanoLoader}"
+          - !Sub "meltano/${MeltanoExtractor}"
+          - --
+          - meltano
+          - elt
+          - !Ref MeltanoExtractor
+          - !Ref MeltanoLoader
+          - --job_id
+          - !Ref JobName
+          - --full-refresh
+      RetryStrategy:
+        Attempts: 1
+
+  AWSBatchEventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "Events Rule for AWS Batch Job ${JobName}"
+      EventPattern:
+        source:
+          - aws.batch
+        detail-type:
+          - Batch Job State Change
+        detail:
+          jobName:
+            - !Ref JobName
+            - !Sub "${JobName}-full-refresh"
+          status:
+            - "FAILED"
+      State: ENABLED
+      Targets:
+        - Arn:
+            Ref: ErrorsTopic
+          Id: cloudwatch-batch-eventrules
+          InputTransformer:
+            InputPathsMap:
+              logStream: "$.detail.container.logStreamName"
+              time: "$.time"
+              jobName: "$.detail.jobName"
+            InputTemplate: '"Your Meltano job <jobName> has failed at <time>. Please check the logs at https://console.aws.amazon.com/cloudwatch/home?#logEventViewer:group=/aws/batch/job;stream=<logStream>."'
+
+  ErrorsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/sns_key
+      Subscription:
+        - Endpoint:
+            Ref: MonitoringEmail
+          Protocol: "email"
+
+  ErrorsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: '*'
+      Topics:
+        - !Ref ErrorsTopic
+
+  CronjobEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "CloudWatch Event that triggers AWS Batch Job ${JobName}"
+      ScheduleExpression: !Sub cron(${JobFrequency})
+      State: ENABLED
+      RoleArn: !GetAtt CloudWatchRole.Arn
+      Targets:
+        - Arn: !Ref JobQueueArn
+          Id: AWSBatchCronjob
+          RoleArn: !GetAtt CloudWatchRole.Arn
+          BatchParameters:
+            JobDefinition: !Ref JobDefinition
+            JobName: !Ref JobName
+
+  CloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  CloudWatchBatchPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - batch:SubmitJob
+            Resource:
+              - !Ref JobDefinition
+              - !Ref JobQueueArn
+      Roles:
+        - !Ref CloudWatchRole
+
+Outputs:
+
+  JobDefinitionArn:
+    Description: Job Definition ARN
+    Value: !Ref JobDefinition

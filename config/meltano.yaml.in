@@ -1,0 +1,9 @@
+template_path: code-build.yaml
+parameters:
+  BuildName: he-meltano
+  GithubRepoUrl: https://github.com/account/repo
+  GithubRepoBranch: refs/heads/main
+stack_tags:
+  env: prod
+  app: meltano
+

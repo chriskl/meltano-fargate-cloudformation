@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Builds an executable Meltano Docker image upon merge to main branch.
+
+Parameters:
+  BuildName:
+    Type: String
+    Description: Lowercase, hyphen-separated build name.  Should be the same as the Github repo name, eg 'he-dbt'
+  GithubRepoUrl:
+    Type: String
+    Default: ""
+    Description: Enter the github repository url of your Meltano project e.g. https://github.com/myuser/dbt-batch.git
+  GithubRepoBranch:
+    Type: String
+    Default: "refs/heads/main"
+    Description: Enter full ref path to desired branch, eg. "refs/heads/main"
+  DockerHubSecret:
+    Type: String
+    Default: docker-hub
+    Description: Secret name containing the Docker Hub username and password
+  BuildSpec:
+    Type: String
+    Default: "buildspec.yml"
+    Description: Enter path relative to repo root to CodeBuild buildspec.yml
+  MonitoringEmail:
+    Type: String
+    Default: codebuild@healthengine.com.au
+    Description: Email address to which to send build failures
+
+Resources:
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref BuildName
+      Description: !Sub "Builds an executable Docker image for ${GithubRepoUrl} upon commit to ${GithubRepoBranch} and stores it in ECR"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: "NO_ARTIFACTS"
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${BuildName}:latest"
+          - Name: AWS_DEFAULT_REGION
+            Type: PLAINTEXT
+            Value: !Ref AWS::Region
+      Source:
+        BuildSpec: !Ref BuildSpec
+        Location: !Ref GithubRepoUrl
+        Type: GITHUB
+      SourceVersion: !Ref GithubRepoBranch
+      TimeoutInMinutes: 10
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: !Sub "^${GithubRepoBranch}$"
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: ["sts:AssumeRole"]
+            Effect: Allow
+            Principal:
+              Service: [codebuild.amazonaws.com]
+        Version: 2012-10-17
+      Path: /
+      Policies:
+        - PolicyName: GetDockerSecret
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DockerHubSecret}-*"
+
+  CodeBuildAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Effect: Allow
+            Resource: "*"
+      Roles:
+        - !Ref CodeBuildRole
+
+  CloudWatchEventsCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+
+  CloudWatchBuildAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "codebuild:StartBuild"
+            Resource: !GetAtt CodeBuildProject.Arn
+      Roles:
+        - !Ref CloudWatchEventsCodeBuildRole
+
+  # See: https://docs.aws.amazon.com/codebuild/latest/userguide/sample-build-notifications.html#sample-build-notifications-ref
+  AWSBatchEventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "Events Rule for CodeBuild Job ${BuildName}"
+      EventPattern:
+        source:
+          - aws.codebuild
+        detail-type:
+          - CodeBuild Build State Change
+        detail:
+          projectName:
+            - !Ref BuildName
+          buildStatus:
+            - FAILED
+      State: ENABLED
+      Targets:
+        - Arn:
+            Ref: ErrorsTopic
+          Id: cloudwatch-codebuild-eventrules
+          InputTransformer:
+            InputPathsMap:
+              logDeepLink: "$.detail.additional-information.logs.deep-link"
+              time: "$.time"
+              projectName: "$.detail.project-name"
+            InputTemplate: '"Your CodeBuild build <projectName> has failed at <time>. Please check the logs at <logDeepLink>."'
+
+  ErrorsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/sns_key
+      Subscription:
+        - Endpoint:
+            Ref: MonitoringEmail
+          Protocol: "email"
+
+  ErrorsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: '*'
+      Topics:
+        - !Ref ErrorsTopic
+
+  BatchProcessRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref BuildName
+      ImageScanningConfiguration:
+        {
+            "ScanOnPush": true
+        }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire images older than 14 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 14
+                },
+                "action": {
+                    "type": "expire"
+                }
+              }
+            ]
+          }
+
+Outputs:
+
+  CodeBuildProjectName:
+    Description: Code Build Project Name
+    Value: !Ref CodeBuildProject
+
+  CodeBuildProjectArn:
+    Description: Code Build Project Arn
+    Value: !GetAtt CodeBuildProject.Arn
+
+  EcrImageTag:
+    Description: ECR Image Tag
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${BuildName}:latest"

@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Meltano ETL batch processing queue
+
+Parameters:
+  JobQueueName:
+    Type: String
+    Description: Descriptive job queue name
+  Priority:
+    Type: Number
+    Default: 1
+    Description: Relative priority of the queue
+  ComputeEnvironmentArn:
+    Type: String
+    Description: ARN of the compute environment that this queue uses
+
+Resources:
+  
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: !Ref JobQueueName
+      Priority: !Ref Priority
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironmentArn
+
+Outputs:
+
+  JobQueueArn:
+    Description: Job Queue Arn
+    Value: !Ref JobQueue

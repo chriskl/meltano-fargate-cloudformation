@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Shared GitHub credential
+
+Parameters:
+  GithubSecret:
+    Type: String
+    Description: Secret name containing the Github Personal Access Token.  Must be created in the AWS console beforehand, for security reasons.  Should be named as the ${BuildName}/github-token and must contain at least one key named 'token' whose value is the security token.
+  GithubSecretKey:
+    Type: String
+    Default: "token"
+    Description: Secret name containing the Github Personal Access Token.  Must be created in the AWS console beforehand, for security reasons.
+
+Resources:
+
+  GithubCreds:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      Token: !Sub "{{resolve:secretsmanager:${GithubSecret}:SecretString:${GithubSecretKey}}}"
+      ServerType: GITHUB
+      AuthType: PERSONAL_ACCESS_TOKEN

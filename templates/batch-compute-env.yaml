@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Meltano compute cluster
+
+Parameters:
+  ComputeEnvironmentName:
+    Type: String
+    Description: Descriptive compute environment name
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC in which to run the AWS instances
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets in which to launch AWS Batch instances
+  MaxvCpus:
+    Type: Number
+    Description: Maximum amount of VCPUs that can be running in this compute environment at once
+
+Resources:
+
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Fargate task launched in the VPC by AWS Batch
+      VpcId: !Ref VpcId
+
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: !Ref ComputeEnvironmentName
+      Type: MANAGED
+      ServiceRole: !Ref BatchServiceRole
+      ComputeResources:
+        Type: FARGATE
+        MaxvCpus: !Ref MaxvCpus
+        Subnets: !Ref Subnets
+        SecurityGroupIds:
+          - Ref: SecurityGroup
+
+Outputs:
+
+  ComputeEnvironmentArn:
+    Description: Compute Environment Arn
+    Value: !Ref ComputeEnvironment
