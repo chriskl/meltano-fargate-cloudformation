@@ -1,6 +1,6 @@
 # meltano-fargate-cloudformation
 
-A Sceptre-based CloudFormation template for running Meltano on ephemeral Fargate tasks. Designed to work with [meltano-fargate-docker](https://github.com/HealthEngineAU/meltano-fargate-docker)
+A Sceptre-based CloudFormation template for running Meltano on ephemeral Fargate tasks. Designed to work with [meltano-fargate-docker](https://github.com/chriskl/meltano-fargate-docker)
 
 ## Setup
 
