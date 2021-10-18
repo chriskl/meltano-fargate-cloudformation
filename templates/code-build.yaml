@@ -136,9 +136,9 @@ Resources:
         detail-type:
           - CodeBuild Build State Change
         detail:
-          projectName:
+          project-name:
             - !Ref BuildName
-          buildStatus:
+          build-status:
             - FAILED
       State: ENABLED
       Targets:
